@@ -1,0 +1,6 @@
+{
+  "name": "分譲マンション管理組合 議案書自動作成・整合性チェック",
+  "description": "分譲マンション管理組合の過去の総会議事録を読み込ませ、議案書を自動作成（Word形式出力）し、過去の決議事項との整合性を自動検証するアプリケーション",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
