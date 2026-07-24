@@ -1,7 +1,5 @@
 import express from "express";
 import path from "path";
-import fs from "fs/promises";
-import crypto from "crypto";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
@@ -17,82 +15,6 @@ async function startServer() {
 
   const BASE_PATH = process.env.BASE_PATH || "";
 
-  const workspaceDir = path.join(process.cwd(), "data", "workspaces");
-
-  const normalizeAccountId = (value: unknown) => String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_.@-]/g, "_")
-    .slice(0, 80);
-
-  const buildWorkspaceFilePath = async (accountId: unknown, accountPin: unknown) => {
-    const normalizedAccountId = normalizeAccountId(accountId);
-    const pin = String(accountPin || "");
-    if (!normalizedAccountId) {
-      throw new Error("担当者アカウントIDを入力してください。");
-    }
-    if (pin.length < 4) {
-      throw new Error("アカウント保護キーは4文字以上で入力してください。");
-    }
-    await fs.mkdir(workspaceDir, { recursive: true });
-    const accountHash = crypto
-      .createHash("sha256")
-      .update(`${normalizedAccountId}:${pin}`)
-      .digest("hex");
-    return {
-      normalizedAccountId,
-      accountHash,
-      filePath: path.join(workspaceDir, `${accountHash}.json`),
-    };
-  };
-
-  app.post(`${BASE_PATH}/api/workspace/load`, async (req, res) => {
-    try {
-      const { accountId, accountPin } = req.body || {};
-      const { normalizedAccountId, filePath } = await buildWorkspaceFilePath(accountId, accountPin);
-      try {
-        const raw = await fs.readFile(filePath, "utf-8");
-        const workspace = JSON.parse(raw);
-        res.json({ success: true, exists: true, accountId: normalizedAccountId, workspace });
-      } catch (error: any) {
-        if (error?.code === "ENOENT") {
-          res.json({ success: true, exists: false, accountId: normalizedAccountId, workspace: null });
-          return;
-        }
-        throw error;
-      }
-    } catch (error: any) {
-      console.error("Workspace load error:", error);
-      res.status(400).json({ success: false, error: error?.message || "担当者ワークスペースの読み込みに失敗しました。" });
-    }
-  });
-
-  app.post(`${BASE_PATH}/api/workspace/save`, async (req, res) => {
-    try {
-      const { accountId, accountPin, workspace } = req.body || {};
-      const { normalizedAccountId, accountHash, filePath } = await buildWorkspaceFilePath(accountId, accountPin);
-      if (!workspace || typeof workspace !== "object") {
-        return res.status(400).json({ success: false, error: "保存するワークスペースデータがありません。" });
-      }
-      const now = new Date().toISOString();
-      const payload = {
-        ...workspace,
-        ownerAccountId: normalizedAccountId,
-        accountHash,
-        savedAt: now,
-        storageMode: "server-account-workspace",
-      };
-      const tmpPath = `${filePath}.${Date.now()}.tmp`;
-      await fs.writeFile(tmpPath, JSON.stringify(payload, null, 2), "utf-8");
-      await fs.rename(tmpPath, filePath);
-      res.json({ success: true, savedAt: now, accountId: normalizedAccountId });
-    } catch (error: any) {
-      console.error("Workspace save error:", error);
-      res.status(400).json({ success: false, error: error?.message || "担当者ワークスペースの保存に失敗しました。" });
-    }
-  });
-
-  // API endpoint aliases without base path for backward compatibility
   // Initialize Gemini SDK with User-Agent for tracking
   const ai = new GoogleGenAI({
     apiKey: process.env.GEMINI_API_KEY,
@@ -395,6 +317,157 @@ ${draftStr}
     }
   });
 
+
+  // API endpoint to support downstream rewriting of management contract / rules / important explanation after minutes are uploaded
+  app.post(`${BASE_PATH}/api/rewrite-support`, async (req, res) => {
+    try {
+      const {
+        condoName,
+        docType,
+        documentText,
+        fileBase64,
+        mimeType,
+        fileName,
+        currentDraft,
+        latestMinutes,
+        pastMinutesList,
+      } = req.body;
+
+      const docTypeLabelMap: Record<string, string> = {
+        currentContract: "現行管理委託契約",
+        managementRules: "管理規約",
+        importantExplanation: "重要事項説明書",
+        other: "その他関連文書",
+      };
+      const docTypeLabel = docTypeLabelMap[docType] || "関連文書";
+
+      const draftStr = currentDraft?.agendas?.length
+        ? currentDraft.agendas.map((a: any) => `【${a.title}】
+提案者: ${a.proposer}
+提案理由: ${a.reason}
+議案内容: ${a.content}
+`).join("\n\n")
+        : "議案書ドラフトはありません。";
+
+      const minutesStr = pastMinutesList?.length
+        ? pastMinutesList.map((m: any) => `【第${m.term}期総会議事録 / ${m.date || "日付不明"}】
+要約: ${m.summary}
+重要ポイント:
+${m.keyContradictionPoints?.map((p: string) => `- ${p}`).join("\n") || ""}
+決議詳細:
+${m.resolutions?.map((r: any) => `- ${r.agendaTitle}（${r.isApproved ? "可決" : "否決"}）: ${r.detail || r.contentSummary}`).join("\n") || ""}
+`).join("\n\n")
+        : "登録済み議事録はありません。";
+
+      let extractedText = documentText || "";
+      let contents: any[] = [];
+
+      const promptBase = `あなたはマンション管理会社の契約・規約改定支援の専門家です。
+以下の情報を照合し、総会議案書作成後にアップロードされた総会議事録の決議内容を踏まえて、後工程で必要となる「現行管理委託契約」「管理規約」「重要事項説明書」等の書き換えを支援してください。
+
+対象マンション: ${condoName}
+確認対象文書: ${docTypeLabel}
+
+■ 今回の総会議案書ドラフト:
+${draftStr}
+
+■ 登録済み総会議事録ナレッジ:
+${minutesStr}
+
+■ 最新議事録:
+${latestMinutes ? `第${latestMinutes.term}期 / ${latestMinutes.date || "日付不明"} / ${latestMinutes.summary || ""}` : "未指定"}
+
+判定方針:
+1. 決議済み事項と現行文書の齟齬を抽出する。
+2. 管理委託料、契約期間、委託業務範囲、管理規約条文、重要事項説明書の説明内容に影響する事項を優先する。
+3. すぐに条文確定せず、管理会社・理事会・専門家が確認すべき「書き換え候補」として出す。
+4. 法的判断の確定ではなく、実務上のレビュー補助として表現する。
+5. 影響がない場合も、その理由と保留すべき確認事項を示す。`;
+
+      if (fileBase64 && mimeType === "application/pdf") {
+        contents = [
+          { inlineData: { data: fileBase64, mimeType: "application/pdf" } },
+          { text: `${promptBase}\n\n上記PDFが確認対象の現行文書です。PDF本文を読んで影響箇所を抽出してください。` },
+        ];
+      } else {
+        if (fileBase64 && (mimeType?.includes("wordprocessingml") || fileName?.endsWith(".docx") || fileName?.endsWith(".doc") || mimeType?.includes("application/msword"))) {
+          try {
+            const buffer = Buffer.from(fileBase64, "base64");
+            const result = await mammoth.extractRawText({ buffer });
+            extractedText = result.value;
+          } catch (err: any) {
+            console.error("Mammoth downstream document parsing failed:", err);
+            return res.status(500).json({ error: "確認対象文書のWordテキスト抽出に失敗しました。" });
+          }
+        } else if (fileBase64 && (mimeType?.startsWith("text/") || fileName?.endsWith(".txt"))) {
+          extractedText = Buffer.from(fileBase64, "base64").toString("utf-8");
+        }
+
+        if (!extractedText.trim()) {
+          return res.status(400).json({ error: "確認対象文書のテキストまたはファイルを送信してください。" });
+        }
+
+        contents = [
+          {
+            text: `${promptBase}
+
+■ 確認対象文書本文:
+${extractedText}`,
+          },
+        ];
+      }
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            required: ["summary", "impactedDocuments", "requiredChanges", "recommendedNextActions", "warnings"],
+            properties: {
+              summary: { type: Type.STRING, description: "全体所見。後工程でどの程度の書き換えが必要かを簡潔に説明する。" },
+              impactedDocuments: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  required: ["documentType", "impactLevel", "reason"],
+                  properties: {
+                    documentType: { type: Type.STRING },
+                    impactLevel: { type: Type.STRING, enum: ["high", "medium", "low", "none"] },
+                    reason: { type: Type.STRING },
+                  },
+                },
+              },
+              requiredChanges: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  required: ["targetDocument", "clauseOrSection", "currentIssue", "suggestedRevision", "sourceResolution"],
+                  properties: {
+                    targetDocument: { type: Type.STRING },
+                    clauseOrSection: { type: Type.STRING },
+                    currentIssue: { type: Type.STRING },
+                    suggestedRevision: { type: Type.STRING },
+                    sourceResolution: { type: Type.STRING },
+                  },
+                },
+              },
+              recommendedNextActions: { type: Type.ARRAY, items: { type: Type.STRING } },
+              warnings: { type: Type.ARRAY, items: { type: Type.STRING } },
+            },
+          },
+        },
+      });
+
+      const result = JSON.parse(response.text || "{}");
+      res.json({ success: true, data: result });
+    } catch (error: any) {
+      console.error("Rewrite support error:", error);
+      res.status(500).json({ error: error?.message || "後工程支援レポートの生成に失敗しました。" });
+    }
+  });
+
   // Vite middleware for development or serving index.html in production
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -404,20 +477,13 @@ ${draftStr}
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    if (BASE_PATH) {
-      app.use(BASE_PATH, express.static(distPath));
-      app.get(`${BASE_PATH}/*`, (req, res) => {
-        res.sendFile(path.join(distPath, "index.html"));
-      });
-      app.get(BASE_PATH, (req, res) => {
-        res.sendFile(path.join(distPath, "index.html"));
-      });
-    } else {
-      app.use(express.static(distPath));
-      app.get("*", (req, res) => {
-        res.sendFile(path.join(distPath, "index.html"));
-      });
-    }
+    app.use(BASE_PATH, express.static(distPath));
+    app.get(`${BASE_PATH}/*`, (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+    app.get(BASE_PATH, (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
   }
 
   app.listen(PORT, "0.0.0.0", () => {

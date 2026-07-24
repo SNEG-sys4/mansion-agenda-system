@@ -26,13 +26,10 @@ import {
   RotateCcw,
   Sparkles,
   RefreshCw,
-  X,
-  User,
-  KeyRound,
-  LogOut,
-  Cloud
+  X
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import * as XLSX from "xlsx";
 import {
   generateDocxFile,
   AgendaDraft,
@@ -41,110 +38,157 @@ import {
   ConsistencyIssue
 } from "./utils/docxGenerator";
 
-// Initial Demo Model Condo
-const DEFAULT_CONDO = {
-  id: "condo_1",
-  name: "アンピール見本",
-  address: "東京都港区高輪二丁目",
-  totalUnits: 120,
-  currentTerm: 25,
+type CondoMaster = {
+  id: string;
+  name: string;
+  address: string;
+  totalUnits: number;
+  currentTerm: number;
+  managementCompany?: string;
+  note?: string;
+  importedAt?: string;
 };
 
-// Initial Demo Past Minutes
-const DEFAULT_PAST_MINUTES: PastMinutes[] = [
-  {
-    id: "minutes_demo_1",
-    condoName: "アンピール見本",
-    term: 24,
-    date: "2025-05-18",
-    summary: "第24期定時総会。事業報告・収支報告・次期予算案が承認された。また、第23期に可決された『大規模修繕に向けた修繕積立金の段階的引き上げ（本第25期より月額3%増額）』の方針が再確認され、総会で承認された。役員の任期は2年（第24期・25期定時総会終了時まで）と定められ、高橋理事が理事長に留任、佐藤理事が監事に就任した。",
-    resolutions: [
-      {
-        id: "res_1",
-        agendaTitle: "第1号議案 第24期管理業務報告及び収支決算報告承認の件",
-        contentSummary: "管理委託業務及び管理費、修繕積立金の収支決算が適正に処理されているものとして承認された。",
-        isApproved: true,
-        detail: "管理費会計は黒字。修繕積立金残高は1億4,500万円。"
-      },
-      {
-        id: "res_2",
-        agendaTitle: "第2号議案 第25期（今期）事業計画及び収支予算案承認の件",
-        contentSummary: "第25期の事業計画及び予算案が承認された。次期（第25期）から修繕積立金改定(段階引上げ3%増)を反映して徴収する。",
-        isApproved: true,
-        detail: "来期からの積立金増額を確約。増額分の使途は2028年予定の大規模修繕資金として充当する。"
-      },
-      {
-        id: "res_3",
-        agendaTitle: "第3号議案 役員改選（選任）の件",
-        contentSummary: "任期満了に伴い、高橋理事長を含む計5名が役員（任期2年：第24期〜第25期定時総会終結まで）として選出・承認された。",
-        isApproved: true,
-        detail: "任期が2年間となる。第25期（今年）の総会は改選期ではなく、第26期（来年）の総会が改選期となる約束とされている。"
-      }
-    ],
-    keyContradictionPoints: [
-      "修繕積立金は、第25期（今年）より段階値上げ（3%増額）を実施することが前々回（第23期）の総会で決議（約束）されている。",
-      "第24期総会で選出された役員（理事長・高橋、監事・佐藤など）の任期は2年（第25期総会終結時まで）であるため、今回の第25期総会では全体改選などの役員選任議案は原則不要（または不要であるはず）とされている。",
-      "管理会社である『新栄総合管理株式会社』との委託契約は、第25期の中旬に契約満了を迎えるため、今回の総会で委託料金および契約期間を定めた契約更新の上程（第25期満了まで等）が必要とされている。"
-    ]
+type KnowledgeDocType = "minutes" | "currentContract" | "managementRules" | "importantExplanation" | "other";
+
+type UploadedKnowledgeDocument = {
+  id: string;
+  condoId: string;
+  condoName: string;
+  type: KnowledgeDocType;
+  fileName: string;
+  mimeType?: string;
+  uploadedAt: string;
+  source: "file" | "text" | "parsed-minutes";
+  text?: string;
+  summary?: string;
+  parsedMinutesId?: string;
+};
+
+type RewriteSupportResult = {
+  summary: string;
+  impactedDocuments: Array<{
+    documentType: string;
+    impactLevel: "high" | "medium" | "low" | "none";
+    reason: string;
+  }>;
+  requiredChanges: Array<{
+    targetDocument: string;
+    clauseOrSection: string;
+    currentIssue: string;
+    suggestedRevision: string;
+    sourceResolution: string;
+  }>;
+  recommendedNextActions: string[];
+  warnings: string[];
+};
+
+const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+const STORAGE_KEYS = {
+  condos: "mansion_agenda_condos_v2",
+  selectedCondoId: "mansion_agenda_selected_condo_id_v2",
+  pastMinutes: "mansion_agenda_past_minutes_v2",
+  knowledgeDocuments: "mansion_agenda_knowledge_documents_v2",
+} as const;
+
+// サンプルデータは同梱しない。利用者が物件マスタExcelまたは手入力で登録する。
+const DEFAULT_CONDOS: CondoMaster[] = [];
+const DEFAULT_PAST_MINUTES: PastMinutes[] = [];
+
+const safeLoadJson = <T,>(key: string, fallback: T): T => {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    console.warn(`localStorageの読み込みに失敗しました: ${key}`, error);
+    return fallback;
   }
-];
-
-
-type CondoRecord = typeof DEFAULT_CONDO;
-
-type WorkspaceSnapshot = {
-  workspaceVersion: string;
-  condos: CondoRecord[];
-  selectedCondoId: string;
-  pastMinutes: PastMinutes[];
-  targetTerm: number;
-  targetDate: string;
-  focusPoints: string;
-  selectedDefaultTypes: Record<string, boolean>;
-  budgetMode: "correct" | "mismatch";
-  personnelReasonMode: "none" | "resignation";
-  currentDraft: { term: number; targetDate: string; agendas: AgendaDraft[] } | null;
-  consistencyIssues: ConsistencyIssue[];
-  isAudited: boolean;
 };
 
-const ACCOUNT_REMEMBER_KEY = "mansion_agenda_active_account_v2";
+const safeSaveJson = (key: string, value: unknown) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    console.warn(`localStorageの保存に失敗しました: ${key}`, error);
+  }
+};
+
+const sanitizeCondos = (items: CondoMaster[]): CondoMaster[] => {
+  if (!Array.isArray(items)) return [];
+  return items
+    .filter((item) => item && item.id !== "condo_1" && item.name !== "アンピール見本")
+    .map((item) => ({
+      id: String(item.id || `condo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
+      name: String(item.name || "").trim(),
+      address: String(item.address || ""),
+      totalUnits: Number(item.totalUnits) || 0,
+      currentTerm: Number(item.currentTerm) || 1,
+      managementCompany: item.managementCompany || "",
+      note: item.note || "",
+      importedAt: item.importedAt || "",
+    }))
+    .filter((item) => item.name);
+};
+
+const sanitizePastMinutes = (items: PastMinutes[]): PastMinutes[] => {
+  if (!Array.isArray(items)) return [];
+  return items.filter((item) => item && item.id !== "minutes_demo_1" && item.condoName !== "アンピール見本");
+};
+
+const toNumber = (value: unknown, fallback = 0): number => {
+  const numeric = Number(String(value ?? "").replace(/[,，戸期\s]/g, ""));
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
+};
+
+const findRowValue = (row: Record<string, unknown>, candidates: string[]): string => {
+  const keys = Object.keys(row);
+  for (const candidate of candidates) {
+    const exact = keys.find((key) => key.trim() === candidate);
+    if (exact && row[exact] !== undefined && row[exact] !== null && String(row[exact]).trim() !== "") {
+      return String(row[exact]).trim();
+    }
+  }
+  for (const key of keys) {
+    const normalized = key.replace(/[\s　]/g, "");
+    const matched = candidates.some((candidate) => normalized.includes(candidate.replace(/[\s　]/g, "")));
+    if (matched && row[key] !== undefined && row[key] !== null && String(row[key]).trim() !== "") {
+      return String(row[key]).trim();
+    }
+  }
+  return "";
+};
+
+const fileToBase64 = (file: File): Promise<string> => (
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      resolve(dataUrl.split(",")[1] || "");
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  })
+);
 
 
 export default function App() {
-  // Tabs: 'dash' | 'past' | 'draft' | 'about'
-  const [activeTab, setActiveTab] = useState<"dash" | "past" | "draft" | "about">("dash");
-
-  const rememberedAccount = (() => {
-    try {
-      return JSON.parse(window.localStorage.getItem(ACCOUNT_REMEMBER_KEY) || "null") || {};
-    } catch {
-      return {};
-    }
-  })();
-
-  // Account-scoped workspace state. Each property manager saves to an isolated account workspace.
-  const [accountId, setAccountId] = useState(String(rememberedAccount.accountId || ""));
-  const [accountDisplayName, setAccountDisplayName] = useState(String(rememberedAccount.accountDisplayName || ""));
-  const [accountPin, setAccountPin] = useState("");
-  const [isAccountReady, setIsAccountReady] = useState(false);
-  const [isLoadingAccount, setIsLoadingAccount] = useState(false);
-  const [isSavingWorkspace, setIsSavingWorkspace] = useState(false);
-  const [accountError, setAccountError] = useState("");
-  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
-  const [saveStatus, setSaveStatus] = useState("未保存");
+  // Tabs: dashboard / property master / minutes knowledge / draft / manual
+  const [activeTab, setActiveTab] = useState<"dash" | "master" | "past" | "draft" | "about">("dash");
 
   // State Management
-  const [condos, setCondos] = useState([DEFAULT_CONDO]);
-  const [selectedCondoId, setSelectedCondoId] = useState("condo_1");
-  const [pastMinutes, setPastMinutes] = useState<PastMinutes[]>(DEFAULT_PAST_MINUTES);
+  const [condos, setCondos] = useState<CondoMaster[]>(() => sanitizeCondos(safeLoadJson(STORAGE_KEYS.condos, DEFAULT_CONDOS)));
+  const [selectedCondoId, setSelectedCondoId] = useState(() => safeLoadJson<string>(STORAGE_KEYS.selectedCondoId, ""));
+  const [pastMinutes, setPastMinutes] = useState<PastMinutes[]>(() => sanitizePastMinutes(safeLoadJson(STORAGE_KEYS.pastMinutes, DEFAULT_PAST_MINUTES)));
+  const [knowledgeDocuments, setKnowledgeDocuments] = useState<UploadedKnowledgeDocument[]>(() => safeLoadJson<UploadedKnowledgeDocument[]>(STORAGE_KEYS.knowledgeDocuments, []));
 
   // New Draft settings
-  const [targetTerm, setTargetTerm] = useState(25);
-  const [targetDate, setTargetDate] = useState("2026-05-24");
-  const [focusPoints, setFocusPoints] = useState(
-    "1. 第23期に決めた修繕積立金の3%増額を今回の基本予算に正しく反映すること。\n2. 今期満了する管理委託契約の更新（委託額据え置き）。\n3. 今回は役員改選の年ではないため、特別な変更がない限り役員選任はスキップすること。"
-  );
+  const [targetTerm, setTargetTerm] = useState(1);
+  const [targetDate, setTargetDate] = useState("");
+  const [focusPoints, setFocusPoints] = useState("");
   const [selectedDefaultTypes, setSelectedDefaultTypes] = useState({
     settlement: true,
     budget: true,
@@ -397,6 +441,13 @@ export default function App() {
   const [fileBase64, setFileBase64] = useState("");
   const [fileMimeType, setFileMimeType] = useState("");
 
+  // Post-meeting document rewrite support
+  const [rewriteDocType, setRewriteDocType] = useState<KnowledgeDocType>("currentContract");
+  const [rewriteFile, setRewriteFile] = useState<File | null>(null);
+  const [rewriteText, setRewriteText] = useState("");
+  const [rewriteResult, setRewriteResult] = useState<RewriteSupportResult | null>(null);
+  const [isRewriteAnalyzing, setIsRewriteAnalyzing] = useState(false);
+
   // Condo Modals & Form State (Avoids browser prompt freeze/block issues in iframe)
   const [isAddCondoOpen, setIsAddCondoOpen] = useState(false);
   const [isEditCondoOpen, setIsEditCondoOpen] = useState(false);
@@ -463,145 +514,49 @@ export default function App() {
   };
 
   // Selected Condo details
-  const currentCondo = condos.find(c => c.id === selectedCondoId) || condos[0];
-
-  const buildWorkspaceSnapshot = (): WorkspaceSnapshot => ({
-    workspaceVersion: "2026-06-23-account-isolated-v1",
-    condos,
-    selectedCondoId,
-    pastMinutes,
-    targetTerm,
-    targetDate,
-    focusPoints,
-    selectedDefaultTypes,
-    budgetMode,
-    personnelReasonMode,
-    currentDraft,
-    consistencyIssues,
-    isAudited,
-  });
-
-  const applyWorkspaceSnapshot = (workspace: Partial<WorkspaceSnapshot> | null) => {
-    const nextCondos = Array.isArray(workspace?.condos) && workspace!.condos.length > 0
-      ? workspace!.condos
-      : [DEFAULT_CONDO];
-    const nextSelectedCondoId = workspace?.selectedCondoId && nextCondos.some(c => c.id === workspace.selectedCondoId)
-      ? workspace.selectedCondoId
-      : nextCondos[0].id;
-    const selectedCondo = nextCondos.find(c => c.id === nextSelectedCondoId) || nextCondos[0];
-    const nextTargetTerm = Number(workspace?.targetTerm || selectedCondo.currentTerm || DEFAULT_CONDO.currentTerm);
-    const nextTargetDate = String(workspace?.targetDate || "2026-05-24");
-    const nextSelectedDefaultTypes = {
-      settlement: workspace?.selectedDefaultTypes?.settlement ?? true,
-      budget: workspace?.selectedDefaultTypes?.budget ?? true,
-      contract: workspace?.selectedDefaultTypes?.contract ?? true,
-      personnel: workspace?.selectedDefaultTypes?.personnel ?? false,
-      repair: workspace?.selectedDefaultTypes?.repair ?? false,
-      general: workspace?.selectedDefaultTypes?.general ?? false,
-    };
-    const nextBudgetMode = workspace?.budgetMode === "mismatch" ? "mismatch" : "correct";
-    const nextPersonnelReasonMode = workspace?.personnelReasonMode === "resignation" ? "resignation" : "none";
-
-    setCondos(nextCondos);
-    setSelectedCondoId(nextSelectedCondoId);
-    setPastMinutes(Array.isArray(workspace?.pastMinutes) ? workspace!.pastMinutes : DEFAULT_PAST_MINUTES);
-    setTargetTerm(nextTargetTerm);
-    setTargetDate(nextTargetDate);
-    setFocusPoints(String(workspace?.focusPoints || focusPoints));
-    setSelectedDefaultTypes(nextSelectedDefaultTypes);
-    setBudgetMode(nextBudgetMode);
-    setPersonnelReasonMode(nextPersonnelReasonMode);
-    setConsistencyIssues(Array.isArray(workspace?.consistencyIssues) ? workspace!.consistencyIssues : []);
-    setIsAudited(Boolean(workspace?.isAudited));
-    setCurrentDraft(workspace?.currentDraft || {
-      term: nextTargetTerm,
-      targetDate: nextTargetDate,
-      agendas: buildPrefilledAgendas(nextTargetTerm, nextSelectedDefaultTypes, nextBudgetMode, nextPersonnelReasonMode)
-    });
+  const currentCondo: CondoMaster = condos.find(c => c.id === selectedCondoId) || condos[0] || {
+    id: "",
+    name: "物件未登録",
+    address: "",
+    totalUnits: 0,
+    currentTerm: targetTerm || 1,
+    managementCompany: "",
+    note: "",
   };
 
-  const handleLoginAccount = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    setAccountError("");
-    const cleanAccountId = accountId.trim();
-    if (!cleanAccountId) {
-      setAccountError("担当者アカウントIDを入力してください。");
-      return;
-    }
-    if (accountPin.length < 4) {
-      setAccountError("アカウント保護キーは4文字以上で入力してください。");
-      return;
-    }
+  const selectedCondoMinutes = pastMinutes.filter(m => m.condoName === currentCondo.name);
+  const selectedCondoKnowledge = knowledgeDocuments.filter(d => d.condoName === currentCondo.name);
 
-    setIsLoadingAccount(true);
-    try {
-      const response = await fetch(import.meta.env.BASE_URL.replace(/\/$/,"") + "/api/workspace/load", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountId: cleanAccountId, accountPin })
-      });
-      const result = await response.json();
-      if (!response.ok || !result.success) {
-        throw new Error(result.error || "担当者ワークスペースを読み込めませんでした。");
-      }
-      applyWorkspaceSnapshot(result.workspace || null);
-      const displayName = accountDisplayName.trim() || cleanAccountId;
-      setAccountId(result.accountId || cleanAccountId);
-      setAccountDisplayName(displayName);
-      window.localStorage.setItem(ACCOUNT_REMEMBER_KEY, JSON.stringify({
-        accountId: result.accountId || cleanAccountId,
-        accountDisplayName: displayName
-      }));
-      setIsAccountReady(true);
-      setSaveStatus(result.exists ? "保存済みワークスペースを読み込みました" : "新規ワークスペースを開始しました");
-      setLastSavedAt(result.workspace?.savedAt || null);
-    } catch (error: any) {
-      setAccountError(error?.message || "担当者ワークスペースの読み込みに失敗しました。");
-    } finally {
-      setIsLoadingAccount(false);
-    }
-  };
+  useEffect(() => {
+    safeSaveJson(STORAGE_KEYS.condos, condos);
+  }, [condos]);
 
-  const handleSaveWorkspace = async () => {
-    setAccountError("");
-    if (!isAccountReady) {
-      setAccountError("先に担当者アカウントで開始してください。");
-      return;
-    }
-    setIsSavingWorkspace(true);
-    try {
-      const response = await fetch(import.meta.env.BASE_URL.replace(/\/$/,"") + "/api/workspace/save", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          accountId,
-          accountPin,
-          workspace: buildWorkspaceSnapshot()
-        })
-      });
-      const result = await response.json();
-      if (!response.ok || !result.success) {
-        throw new Error(result.error || "保存できませんでした。");
-      }
-      setLastSavedAt(result.savedAt || new Date().toISOString());
-      setSaveStatus("この担当者アカウント専用領域へ保存済み");
-    } catch (error: any) {
-      setAccountError(error?.message || "保存に失敗しました。");
-      setSaveStatus("保存失敗");
-    } finally {
-      setIsSavingWorkspace(false);
-    }
-  };
+  useEffect(() => {
+    safeSaveJson(STORAGE_KEYS.pastMinutes, pastMinutes);
+  }, [pastMinutes]);
 
-  const handleLogoutAccount = () => {
-    setIsAccountReady(false);
-    setAccountPin("");
-    setAccountError("");
-    setSaveStatus("未保存");
-  };
+  useEffect(() => {
+    safeSaveJson(STORAGE_KEYS.knowledgeDocuments, knowledgeDocuments);
+  }, [knowledgeDocuments]);
 
-  // Drafts are no longer regenerated automatically on every term/date change.
-  // This prevents another save or simple setting change from overwriting an edited draft.
+  useEffect(() => {
+    safeSaveJson(STORAGE_KEYS.selectedCondoId, selectedCondoId);
+  }, [selectedCondoId]);
+
+  useEffect(() => {
+    if (condos.length > 0 && !condos.some(c => c.id === selectedCondoId)) {
+      setSelectedCondoId(condos[0].id);
+      setTargetTerm(condos[0].currentTerm);
+    }
+    if (condos.length === 0 && selectedCondoId) {
+      setSelectedCondoId("");
+    }
+  }, [condos, selectedCondoId]);
+
+  // Auto-initialize our interactive draft on mount or selectedCondo/term change, so it's always ready!
+  useEffect(() => {
+    handleApplyTemplates();
+  }, [selectedCondoId, targetTerm, targetDate]);
 
   // Toggle individual agenda existence directly in real-time
   const handleToggleAgendaType = (type: keyof typeof selectedDefaultTypes) => {
@@ -769,25 +724,175 @@ export default function App() {
     setSelectedCondoId(newCondo.id);
   };
 
-  // Preset loading for easy evaluation
+  const handleCondoExcelImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: "array" });
+      const firstSheetName = workbook.SheetNames[0];
+      if (!firstSheetName) {
+        alert("Excelファイル内にシートが見つかりません。");
+        return;
+      }
+
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[firstSheetName], { defval: "" });
+      const imported: CondoMaster[] = rows
+        .map((row, index) => {
+          const name = findRowValue(row, ["マンション名", "物件名", "管理組合名", "建物名", "name", "Name"]);
+          if (!name) return null;
+
+          const address = findRowValue(row, ["住所", "所在地", "address", "Address"]);
+          const unitsRaw = findRowValue(row, ["総戸数", "戸数", "管理戸数", "units", "totalUnits"]);
+          const termRaw = findRowValue(row, ["現在期", "期", "運営期", "currentTerm", "term"]);
+          const managementCompany = findRowValue(row, ["管理会社", "委託先", "managementCompany"]);
+          const note = findRowValue(row, ["備考", "メモ", "note"]);
+
+          return {
+            id: `condo_${Date.now()}_${index}`,
+            name,
+            address: address || "未登録",
+            totalUnits: toNumber(unitsRaw, 0),
+            currentTerm: toNumber(termRaw, 1),
+            managementCompany,
+            note,
+            importedAt: new Date().toISOString(),
+          };
+        })
+        .filter(Boolean) as CondoMaster[];
+
+      if (imported.length === 0) {
+        alert("取り込める物件がありませんでした。列名に「マンション名」「物件名」「管理組合名」のいずれかを含めてください。");
+        return;
+      }
+
+      const merged = [...condos];
+      let added = 0;
+      let updated = 0;
+
+      imported.forEach((item) => {
+        const existingIndex = merged.findIndex(c => c.name.trim() === item.name.trim());
+        if (existingIndex >= 0) {
+          merged[existingIndex] = {
+            ...merged[existingIndex],
+            ...item,
+            id: merged[existingIndex].id,
+            address: item.address || merged[existingIndex].address,
+            totalUnits: item.totalUnits || merged[existingIndex].totalUnits,
+            currentTerm: item.currentTerm || merged[existingIndex].currentTerm,
+          };
+          updated += 1;
+        } else {
+          merged.push(item);
+          added += 1;
+        }
+      });
+
+      setCondos(merged);
+      if (!selectedCondoId && imported[0]) {
+        setSelectedCondoId(imported[0].id);
+        setTargetTerm(imported[0].currentTerm);
+      }
+      alert(`物件マスタを取り込みました。新規 ${added} 件、更新 ${updated} 件。`);
+    } catch (error: any) {
+      console.error("Condo Excel import error:", error);
+      alert("物件マスタExcelの取り込みに失敗しました: " + (error.message || error));
+    }
+  };
+
+  const handleDeleteCondo = (condoId: string) => {
+    const target = condos.find(c => c.id === condoId);
+    if (!target) return;
+    const relatedMinutes = pastMinutes.filter(m => m.condoName === target.name).length;
+    const relatedDocs = knowledgeDocuments.filter(d => d.condoName === target.name).length;
+    if (!confirm(`${target.name} を物件マスタから削除しますか？\n関連する議事録 ${relatedMinutes} 件、ナレッジ文書 ${relatedDocs} 件は履歴保護のため自動削除しません。`)) {
+      return;
+    }
+    setCondos(prev => prev.filter(c => c.id !== condoId));
+  };
+
+  const handleRewriteFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] || null;
+    setRewriteFile(file);
+    setRewriteResult(null);
+  };
+
+  const handleRunRewriteSupport = async () => {
+    if (!currentCondo || !currentCondo.id) {
+      alert("先に物件マスタから対象物件を登録・選択してください。");
+      return;
+    }
+    if (!currentDraft || currentDraft.agendas.length === 0) {
+      alert("先に総会議案書ドラフトを作成してください。");
+      return;
+    }
+    if (selectedCondoMinutes.length === 0) {
+      alert("総会議事録が未登録です。議案書作成後にアップロードされた議事録を先に登録してください。");
+      return;
+    }
+    if (!rewriteText.trim() && !rewriteFile) {
+      alert("現行管理委託契約・管理規約・重説などの文書テキストまたはファイルを指定してください。");
+      return;
+    }
+
+    setIsRewriteAnalyzing(true);
+    setRewriteResult(null);
+    try {
+      const requestBody: any = {
+        condoName: currentCondo.name,
+        docType: rewriteDocType,
+        documentText: rewriteText,
+        currentDraft,
+        latestMinutes: selectedCondoMinutes.sort((a, b) => b.term - a.term)[0],
+        pastMinutesList: selectedCondoMinutes,
+      };
+
+      if (rewriteFile) {
+        requestBody.fileName = rewriteFile.name;
+        requestBody.mimeType = rewriteFile.type || "application/octet-stream";
+        requestBody.fileBase64 = await fileToBase64(rewriteFile);
+      }
+
+      const response = await fetch(`${API_BASE}/api/rewrite-support`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      });
+      const resData = await response.json();
+      if (!resData.success || !resData.data) {
+        throw new Error(resData.error || "後工程支援レポートの生成に失敗しました。");
+      }
+
+      setRewriteResult(resData.data);
+      const knowledgeDoc: UploadedKnowledgeDocument = {
+        id: "doc_" + Date.now(),
+        condoId: currentCondo.id,
+        condoName: currentCondo.name,
+        type: rewriteDocType,
+        fileName: rewriteFile?.name || `${rewriteDocType}_manual_text.txt`,
+        mimeType: rewriteFile?.type || "text/plain",
+        uploadedAt: new Date().toISOString(),
+        source: rewriteFile ? "file" : "text",
+        text: rewriteText.slice(0, 50000),
+        summary: resData.data.summary,
+      };
+      setKnowledgeDocuments(prev => [knowledgeDoc, ...prev]);
+      alert("後工程支援レポートを作成し、文書ナレッジとして保存しました。");
+    } catch (error: any) {
+      console.error("Rewrite support error:", error);
+      alert("後工程支援レポートの作成に失敗しました: " + (error.message || error));
+    } finally {
+      setIsRewriteAnalyzing(false);
+    }
+  };
+
+  // Sample data has intentionally been removed from the packaged app.
   const loadExampleMinutes = () => {
-    setMinutesText(`第23期定時総会議事録
-日時：2024年5月18日
-場所：高輪グランドハイツ集会室
-出席者：区分所有者120名のうち、出席・書面表決合わせて102名
-
-第1号議案：第23期収支決算報告承認の件（全会一致で可決承認）
-第2号議案：修繕積立金段階的引上げの計画承認の件
-理事長から、将来の大規模修繕工事（第27期を予定）に備え、修繕積立金が大幅に不足する見込みであることが報告された。この対応策として、第25期（再来年）より修繕積立金一律3%増額を実施し、毎年の徴収額を補強する段階増額スキームが提案された。
-組合員より、現在の物価高の状況下で負担増を懸念する意見があったが、大規模修繕の実現に不可欠であるとの理事会説明に対し、出席者の4分の3以上の賛成を得て可決・承認された。
-【重要約束】：本件決定に基づき、第25期の定時総会予算案においては、修繕積立金を3%増額した内容で予算計画を策定・可決することを義務付ける（後年に繰り延べ不可）。
-
-第3号議案：役員選任の件（可決承認）
-役員の任期については管理規約に則り2年間とする。今回新たに高橋理事長、鈴木理事、佐藤監事らが選出された。彼らの任期は第23期定時総会終結から第25期定時総会終結時まで（2年間）の運営を担う。第24期は中間年であり役員改選は不要、第25期定時総会にて改選を行う。`);
-    
-    setMinutesFileName("第23期定時総会議事録.txt");
-    setMinutesUploadTerm(23);
-    setMinutesUploadDate("2024-05-18");
+    setMinutesText("");
+    setMinutesFileName("");
+    alert("サンプル議事録データはご要望に基づき削除済みです。実際の議事録ファイルまたはテキストを登録してください。");
   };
 
   // File helpers in browser
@@ -844,7 +949,7 @@ export default function App() {
         requestBody.text = minutesText;
       }
 
-      const response = await fetch(import.meta.env.BASE_URL.replace(/\/$/,"") + "/api/parse-minutes", {
+      const response = await fetch(`${API_BASE}/api/parse-minutes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody)
@@ -862,9 +967,23 @@ export default function App() {
           keyContradictionPoints: item.keyContradictionPoints || []
         };
         setPastMinutes(prev => [newMinutes, ...prev]);
+        const storedDoc: UploadedKnowledgeDocument = {
+          id: "doc_" + Date.now(),
+          condoId: currentCondo.id,
+          condoName: newMinutes.condoName,
+          type: "minutes",
+          fileName: requestBody.fileName,
+          mimeType: requestBody.mimeType || "text/plain",
+          uploadedAt: new Date().toISOString(),
+          source: "parsed-minutes",
+          text: uploadMode === "text" ? minutesText : "",
+          summary: newMinutes.summary,
+          parsedMinutesId: newMinutes.id,
+        };
+        setKnowledgeDocuments(prev => [storedDoc, ...prev]);
         setMinutesText("");
         handleClearFile();
-        alert(`【AI解析成功】第${newMinutes.term}期の議事録を読み込み、正常に過去データベースへ登録しました。`);
+        alert(`【AI解析成功】第${newMinutes.term}期の議事録を読み込み、過去議事録DBとナレッジDBへ永続保存しました。`);
         setActiveTab("past");
       } else {
         throw new Error(resData.error || "解析結果が不正です。");
@@ -894,7 +1013,7 @@ export default function App() {
           return "第6号議案：管理細則一部改定の件";
         });
 
-      const response = await fetch(import.meta.env.BASE_URL.replace(/\/$/,"") + "/api/generate-draft", {
+      const response = await fetch(`${API_BASE}/api/generate-draft`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -939,7 +1058,7 @@ export default function App() {
     setIsChecking(true);
     try {
       const condoPastMinutes = pastMinutes.filter(m => m.condoName === currentCondo.name);
-      const response = await fetch(import.meta.env.BASE_URL.replace(/\/$/,"") + "/api/check-consistency", {
+      const response = await fetch(`${API_BASE}/api/check-consistency`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1009,111 +1128,6 @@ export default function App() {
     alert("【シミュレーション】予算案を『値上げ据え置き（矛盾コード）』に変更し、さらに改選期ではないのに『全員辞任に伴う役員改選議案（不要な議案）』を注入しました！\n「過去決議との整合性チェック」を実行してみて、AIが不整合を検知できるか確認してください。");
   };
 
-  if (!isAccountReady) {
-    return (
-      <div className="min-h-screen bg-slate-100 text-slate-800 font-sans flex items-center justify-center p-4">
-        <div className="max-w-4xl w-full grid grid-cols-1 md:grid-cols-2 bg-white rounded-3xl shadow-xl border border-slate-200 overflow-hidden">
-          <div className="bg-slate-900 text-white p-8 flex flex-col justify-between gap-8">
-            <div className="space-y-4">
-              <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-lg">
-                <ShieldCheck className="w-6 h-6" />
-              </div>
-              <div>
-                <h1 className="text-2xl font-bold leading-snug">議案書自動作成・整合性チェック</h1>
-                <p className="text-sm text-slate-300 mt-3 leading-relaxed">
-                  各物件担当者が自分のアカウントでログインし、担当物件・議事録DB・議案ドラフトを個別に保存できます。
-                  別担当者の保存内容とは分離されるため、他者の更新で自分の作業内容が上書きされません。
-                </p>
-              </div>
-            </div>
-            <div className="space-y-3 text-xs text-slate-300">
-              <div className="flex items-start gap-2">
-                <CheckCircle2 className="w-4 h-4 text-green-400 mt-0.5" />
-                <span>担当者アカウントIDと保護キーごとに保存領域を分離</span>
-              </div>
-              <div className="flex items-start gap-2">
-                <CheckCircle2 className="w-4 h-4 text-green-400 mt-0.5" />
-                <span>複数物件を同じ担当者ワークスペース内で管理可能</span>
-              </div>
-              <div className="flex items-start gap-2">
-                <CheckCircle2 className="w-4 h-4 text-green-400 mt-0.5" />
-                <span>保存済みデータはサーバー側のアカウント専用JSONに保持</span>
-              </div>
-            </div>
-          </div>
-
-          <form onSubmit={handleLoginAccount} className="p-8 space-y-5">
-            <div>
-              <div className="text-xs font-bold text-indigo-600 mb-2">新栄総合管理・議案書作成支援AI</div>
-              <h2 className="text-xl font-bold text-slate-900">担当者アカウントで開始</h2>
-              <p className="text-xs text-slate-500 mt-2 leading-relaxed">
-                例：front-tanaka、sato-a など。保護キーは同じアカウント領域を再読込するために必要です。
-              </p>
-            </div>
-
-            <div className="space-y-3">
-              <label className="block">
-                <span className="text-[11px] font-bold text-slate-500 flex items-center gap-1 mb-1">
-                  <User className="w-3.5 h-3.5" /> 担当者名・表示名
-                </span>
-                <input
-                  value={accountDisplayName}
-                  onChange={(e) => setAccountDisplayName(e.target.value)}
-                  placeholder="例：田中、佐藤A"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-500"
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-[11px] font-bold text-slate-500 flex items-center gap-1 mb-1">
-                  <Cloud className="w-3.5 h-3.5" /> 担当者アカウントID <span className="text-red-500">*</span>
-                </span>
-                <input
-                  value={accountId}
-                  onChange={(e) => setAccountId(e.target.value)}
-                  placeholder="例：front-tanaka"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-500"
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-[11px] font-bold text-slate-500 flex items-center gap-1 mb-1">
-                  <KeyRound className="w-3.5 h-3.5" /> アカウント保護キー <span className="text-red-500">*</span>
-                </span>
-                <input
-                  type="password"
-                  value={accountPin}
-                  onChange={(e) => setAccountPin(e.target.value)}
-                  placeholder="4文字以上"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-indigo-500"
-                />
-              </label>
-            </div>
-
-            {accountError && (
-              <div className="bg-red-50 border border-red-100 text-red-700 rounded-xl p-3 text-xs font-medium">
-                {accountError}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={isLoadingAccount}
-              className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white font-bold text-sm py-3 rounded-xl transition shadow-md flex items-center justify-center gap-2"
-            >
-              {isLoadingAccount ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
-              {isLoadingAccount ? "読み込み中..." : "このアカウントで開始"}
-            </button>
-
-            <div className="bg-amber-50 border border-amber-100 text-amber-800 rounded-xl p-3 text-[11px] leading-relaxed">
-              同じ担当者IDでも保護キーが異なる場合は別の保存領域になります。共有アカウント運用は避け、担当者ごとに固有IDを使ってください。
-            </div>
-          </form>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-slate-100 text-slate-800 font-sans flex flex-col">
       {/* Bento Grid layout outer container */}
@@ -1126,7 +1140,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-lg md:text-xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
-                議案書自動作成・整合性チェック
+                新栄総合管理・議案書作成支援AI 
                 <span className="text-indigo-600 font-semibold text-xs bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-lg">
                   管理組合総会支援システム
                 </span>
@@ -1137,80 +1151,48 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex flex-col md:flex-row gap-2 w-full md:w-auto md:items-center">
-            <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-100 px-3 py-2 rounded-xl justify-between md:justify-start">
-              <div className="flex items-center gap-2 min-w-0">
-                <User className="w-4 h-4 text-indigo-600" />
-                <div className="text-left min-w-0">
-                  <div className="text-[10px] text-indigo-500 font-bold uppercase tracking-wider leading-none">担当者アカウント</div>
-                  <div className="text-xs font-bold text-slate-800 truncate max-w-[180px]">{accountDisplayName || accountId}</div>
-                  <div className="text-[10px] text-slate-500 truncate max-w-[180px]">{saveStatus}{lastSavedAt ? `・${new Date(lastSavedAt).toLocaleString()}` : ""}</div>
-                </div>
-              </div>
-              <button
-                onClick={handleSaveWorkspace}
-                disabled={isSavingWorkspace}
-                className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white rounded-lg text-[11px] font-bold flex items-center gap-1 transition"
-                title="この担当者アカウント専用領域に保存"
-              >
-                {isSavingWorkspace ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                保存
-              </button>
-              <button
-                onClick={handleLogoutAccount}
-                className="p-1.5 bg-white hover:bg-slate-100 border border-indigo-100 text-slate-500 transition rounded-lg"
-                title="担当者を切り替える"
-              >
-                <LogOut className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 px-4 py-2 rounded-xl justify-between md:justify-start">
-              <div className="flex items-center gap-2.5 font-normal">
-                <Building className="w-4 h-4 text-indigo-500" />
-                <div className="text-left">
-                  <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider leading-none">選択中のマンション</div>
-                  <select
-                    value={selectedCondoId}
-                    onChange={(e) => {
-                      const nextId = e.target.value;
-                      setSelectedCondoId(nextId);
-                      const found = condos.find(c => c.id === nextId);
-                      if (found) {
-                        setTargetTerm(found.currentTerm);
-                      }
-                    }}
-                    className="bg-transparent text-xs font-bold border-none text-slate-800 focus:outline-none cursor-pointer mt-0.5"
-                  >
-                    {condos.map((c) => (
+                    <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 px-4 py-2 rounded-xl w-full md:w-auto justify-between md:justify-start">
+            <div className="flex items-center gap-2.5 font-normal">
+              <Building className="w-4 h-4 text-indigo-500" />
+              <div className="text-left">
+                <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider leading-none">選択中のマンション</div>
+                <select
+                  value={selectedCondoId}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    setSelectedCondoId(nextId);
+                    const found = condos.find(c => c.id === nextId);
+                    if (found) {
+                      setTargetTerm(found.currentTerm);
+                    }
+                  }}
+                  className="bg-transparent text-xs font-bold border-none text-slate-800 focus:outline-none cursor-pointer mt-0.5"
+                >
+                  {condos.length === 0 ? (
+                    <option value="" className="text-slate-900">物件未登録</option>
+                  ) : (
+                    condos.map((c) => (
                       <option key={c.id} value={c.id} className="text-slate-900">
                         {c.name}
                       </option>
-                    ))}
-                  </select>
-                </div>
+                    ))
+                  )}
+                </select>
               </div>
-              <button
-                onClick={handleOpenAddCondo}
-                className="p-1.5 bg-white hover:bg-slate-100 border border-slate-200 text-slate-600 transition rounded-lg ml-2 shadow-sm"
-                title="マンション追加"
-              >
-                <Plus className="w-4 h-4" />
-              </button>
             </div>
+            <button
+              onClick={handleOpenAddCondo}
+              className="p-1.5 bg-white hover:bg-slate-100 border border-slate-200 text-slate-600 transition rounded-lg ml-2 shadow-sm"
+              title="マンション追加"
+            >
+              <Plus className="w-4 h-4" />
+            </button>
           </div>
         </header>
 
-        {accountError && (
-          <div className="bg-red-50 border border-red-100 text-red-700 rounded-xl p-3 text-xs font-medium flex items-start gap-2">
-            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-            <span>{accountError}</span>
-          </div>
-        )}
-
         {/* Main Tabs Navigation - Bento Grid Navigation block */}
         <div className="bg-white border border-slate-200 rounded-2xl p-2 shadow-sm">
-          <nav className="grid grid-cols-2 md:grid-cols-4 gap-1.5">
+          <nav className="grid grid-cols-2 md:grid-cols-5 gap-1.5">
             <button
               onClick={() => setActiveTab("dash")}
               className={`py-3 px-4 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 transition ${
@@ -1221,6 +1203,22 @@ export default function App() {
             >
               <Layers className="w-4 h-4" />
               理事会ダッシュボード
+            </button>
+            <button
+              onClick={() => setActiveTab("master")}
+              className={`py-3 px-4 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 transition ${
+                activeTab === "master"
+                  ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/10"
+                  : "text-slate-500 hover:text-slate-900 hover:bg-slate-50"
+              }`}
+            >
+              <Building className="w-4 h-4" />
+              物件マスタ
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ml-1 ${
+                activeTab === "master" ? "bg-indigo-700 text-indigo-100" : "bg-slate-100 text-slate-600"
+              }`}>
+                {condos.length}
+              </span>
             </button>
             <button
               onClick={() => setActiveTab("past")}
@@ -1482,6 +1480,129 @@ export default function App() {
             )}
 
             {/* ==========================================
+                TAB 2: PROPERTY MASTER
+                ========================================== */}
+            {activeTab === "master" && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="space-y-6"
+                key="master"
+              >
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                  <div>
+                    <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                      <Building className="text-indigo-600" />
+                      物件マスタ
+                    </h2>
+                    <p className="text-sm text-slate-500 font-normal">
+                      サンプルデータは削除済みです。Excelから実物件を取り込み、議案書・議事録ナレッジの対象物件として利用します。
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={handleOpenAddCondo}
+                      className="bg-white border border-slate-200 text-slate-700 text-xs font-bold px-4 py-2 rounded-xl transition hover:bg-slate-50 flex items-center gap-1.5 shadow-sm"
+                    >
+                      <Plus className="w-4 h-4 text-indigo-500" />
+                      手入力で追加
+                    </button>
+                    <label className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2 rounded-xl transition flex items-center gap-1.5 shadow-sm cursor-pointer">
+                      <UploadCloud className="w-4 h-4" />
+                      Excel取込
+                      <input
+                        type="file"
+                        accept=".xlsx,.xls,.csv"
+                        onChange={handleCondoExcelImport}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm space-y-3">
+                    <h3 className="font-bold text-slate-900 text-sm">Excel取込の列名</h3>
+                    <p className="text-xs text-slate-500 leading-relaxed">
+                      1行目を見出しとして読み込みます。以下の列名に対応しています。既存物件と同名の場合は削除せず差分更新します。
+                    </p>
+                    <div className="text-xs bg-slate-50 border border-slate-100 rounded-xl p-3 leading-relaxed text-slate-600 font-mono">
+                      必須: マンション名 / 物件名 / 管理組合名<br />
+                      任意: 住所, 総戸数, 現在期, 管理会社, 備考
+                    </div>
+                    <div className="bg-amber-50 border border-amber-100 text-amber-700 text-xs rounded-xl p-3 leading-relaxed">
+                      物件削除時も、過去議事録・アップロード済みナレッジ文書は履歴保護のため自動削除しません。
+                    </div>
+                  </div>
+
+                  <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+                    <div className="p-4 border-b border-slate-100 flex justify-between items-center">
+                      <h3 className="font-bold text-slate-900 text-sm">登録物件一覧</h3>
+                      <span className="text-xs bg-slate-100 text-slate-600 px-2 py-1 rounded-lg font-semibold">{condos.length}件</span>
+                    </div>
+                    {condos.length === 0 ? (
+                      <div className="p-12 text-center text-slate-400 space-y-2">
+                        <Building className="w-12 h-12 mx-auto stroke-[1.2] text-slate-300" />
+                        <div>物件マスタは未登録です。</div>
+                        <p className="text-xs">Excel取込または手入力で、実際の管理物件を登録してください。</p>
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-slate-100">
+                        {condos.map((condo) => (
+                          <div key={condo.id} className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                            <div className="space-y-1">
+                              <div className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                                {condo.name}
+                                {condo.id === selectedCondoId && (
+                                  <span className="text-[10px] bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full">選択中</span>
+                                )}
+                              </div>
+                              <div className="text-xs text-slate-500">
+                                {condo.address || "住所未登録"} / {condo.totalUnits || 0}戸 / 第{condo.currentTerm || 1}期
+                                {condo.managementCompany ? ` / ${condo.managementCompany}` : ""}
+                              </div>
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => {
+                                  setSelectedCondoId(condo.id);
+                                  setTargetTerm(condo.currentTerm || 1);
+                                }}
+                                className="text-xs bg-indigo-50 text-indigo-700 hover:bg-indigo-100 px-3 py-1.5 rounded-lg font-bold"
+                              >
+                                選択
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setSelectedCondoId(condo.id);
+                                  setTargetTerm(condo.currentTerm || 1);
+                                  setEditCondoName(condo.name);
+                                  setEditCondoUnits(condo.totalUnits);
+                                  setEditCondoTerm(condo.currentTerm);
+                                  setIsEditCondoOpen(true);
+                                }}
+                                className="text-xs bg-slate-100 text-slate-600 hover:bg-slate-200 px-3 py-1.5 rounded-lg font-bold"
+                              >
+                                編集
+                              </button>
+                              <button
+                                onClick={() => handleDeleteCondo(condo.id)}
+                                className="text-xs bg-red-50 text-red-600 hover:bg-red-100 px-3 py-1.5 rounded-lg font-bold"
+                              >
+                                削除
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* ==========================================
                 TAB 2: PAST MINUTES DATABASE
                 ========================================== */}
             {activeTab === "past" && (
@@ -1502,13 +1623,10 @@ export default function App() {
                       過去の意思決定（決議事項・宿題・任期・工事約束等）を登録することで、今期の提案不整合を自動監査します。
                     </p>
                   </div>
-                  <button
-                    onClick={loadExampleMinutes}
-                    className="bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold px-4 py-2 rounded-xl transition flex items-center gap-1.5 shadow-sm"
-                  >
-                    <Sparkles className="w-4 h-4 text-white" />
-                    サンプル議事録(矛盾付き)を読み込む
-                  </button>
+                  <div className="bg-slate-100 text-slate-500 text-xs font-bold px-4 py-2 rounded-xl flex items-center gap-1.5">
+                    <Info className="w-4 h-4" />
+                    サンプルデータ削除済み
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1663,7 +1781,7 @@ export default function App() {
                   <div className="lg:col-span-2 space-y-4 font-normal">
                     <div className="flex justify-between items-center border-b border-slate-100 pb-2">
                       <h3 className="font-bold text-slate-900 text-md">
-                        現在登録されている過去の総会議事録（全件）
+                        現在登録されている過去の総会議事録（直近5回分）
                       </h3>
                       <span className="text-xs bg-slate-100 text-slate-600 px-2 py-1 rounded-lg font-semibold">
                         登録件数: {pastMinutes.filter(m => m.condoName === currentCondo.name).length}件
@@ -1675,7 +1793,7 @@ export default function App() {
                         <FileText className="w-12 h-12 mx-auto stroke-[1.2] text-slate-300" />
                         <div>過去の議事録データが登録されていません。</div>
                         <p className="text-xs max-w-sm mx-auto text-slate-400">
-                          左側のフォームからファイルをアップロードするか、右上の「サンプル議事録」をクリックしてお試しデータを流し込んでください。登録件数に上限はありません。
+                          左側のフォームから実際の議事録ファイルまたはテキストを登録してください。登録後はブラウザ内に永続保存されます。
                         </p>
                       </div>
                     ) : (
@@ -1683,6 +1801,7 @@ export default function App() {
                         {pastMinutes
                           .filter(m => m.condoName === currentCondo.name)
                           .sort((a, b) => b.term - a.term)
+                          .slice(0, 5) // Display only the 5 most recent records
                           .map((minutes) => (
                             <div key={minutes.id} className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm space-y-4 relative overflow-hidden font-normal animate-fadeIn">
                               <div className="absolute right-0 top-0 flex items-center">
@@ -1757,7 +1876,9 @@ export default function App() {
                   </div>
                 </div>
               </motion.div>
-            )}\n\n                    {/* ==========================================
+            )}
+
+            {/* ==========================================
               TAB 3: DRAFT CREATION & AUDITING & EXPORT
               ========================================== */}
           {activeTab === "draft" && (
@@ -2077,6 +2198,119 @@ export default function App() {
                             )}
                           </motion.div>
                         )}
+
+                        {/* Post-meeting downstream document support */}
+                        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-4 mt-4">
+                          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-3 border-b border-slate-100 pb-3">
+                            <div>
+                              <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                                <FileText className="w-4 h-4 text-indigo-600" />
+                                後工程支援：契約・規約・重説の書き換え影響確認
+                              </h3>
+                              <p className="text-[11px] text-slate-500 leading-relaxed">
+                                総会議案書作成後にアップロードされた総会議事録を根拠として、現行管理委託契約・管理規約・重要事項説明書の変更候補を抽出します。
+                              </p>
+                            </div>
+                            <span className="text-[10px] bg-emerald-50 text-emerald-700 px-2 py-1 rounded-lg font-bold">
+                              議事録ナレッジ {selectedCondoMinutes.length} 件
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                            <div>
+                              <label className="block text-slate-600 font-medium mb-1">確認対象文書</label>
+                              <select
+                                value={rewriteDocType}
+                                onChange={(e) => setRewriteDocType(e.target.value as KnowledgeDocType)}
+                                className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2 focus:outline-none focus:border-indigo-500"
+                              >
+                                <option value="currentContract">現行管理委託契約</option>
+                                <option value="managementRules">管理規約</option>
+                                <option value="importantExplanation">重要事項説明書</option>
+                                <option value="other">その他</option>
+                              </select>
+                            </div>
+                            <div className="md:col-span-2">
+                              <label className="block text-slate-600 font-medium mb-1">文書ファイル（任意: pdf/doc/docx/txt）</label>
+                              <input
+                                type="file"
+                                accept=".pdf,.doc,.docx,.txt"
+                                onChange={handleRewriteFileChange}
+                                className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2 focus:outline-none focus:border-indigo-500"
+                              />
+                            </div>
+                            <div className="md:col-span-3">
+                              <label className="block text-slate-600 font-medium mb-1">文書テキスト貼り付け（ファイルがない場合はこちら）</label>
+                              <textarea
+                                rows={5}
+                                value={rewriteText}
+                                onChange={(e) => setRewriteText(e.target.value)}
+                                placeholder="現行管理委託契約、管理規約、重要事項説明書などの該当条文・該当ページのテキストを貼り付けてください。"
+                                className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 focus:outline-none focus:border-indigo-500 font-mono text-xs"
+                              />
+                            </div>
+                          </div>
+
+                          <button
+                            onClick={handleRunRewriteSupport}
+                            disabled={isRewriteAnalyzing}
+                            className={`w-full py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition ${
+                              isRewriteAnalyzing
+                                ? "bg-slate-200 text-slate-400 cursor-not-allowed"
+                                : "bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm"
+                            }`}
+                          >
+                            {isRewriteAnalyzing ? (
+                              <>
+                                <RefreshCw className="w-4 h-4 animate-spin" />
+                                議事録・議案書・現行文書の影響確認中...
+                              </>
+                            ) : (
+                              <>
+                                <ShieldCheck className="w-4 h-4 text-emerald-100" />
+                                後工程の書き換え候補を抽出
+                              </>
+                            )}
+                          </button>
+
+                          {rewriteResult && (
+                            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3 text-xs">
+                              <div>
+                                <div className="font-bold text-slate-900 mb-1">総括</div>
+                                <p className="text-slate-600 leading-relaxed">{rewriteResult.summary}</p>
+                              </div>
+                              {rewriteResult.requiredChanges?.length > 0 && (
+                                <div className="space-y-2">
+                                  <div className="font-bold text-slate-900">書き換え候補</div>
+                                  {rewriteResult.requiredChanges.map((item, idx) => (
+                                    <div key={idx} className="bg-white border border-slate-100 rounded-xl p-3 space-y-1">
+                                      <div className="font-bold text-indigo-700">{item.targetDocument} / {item.clauseOrSection}</div>
+                                      <div className="text-slate-600">現状課題: {item.currentIssue}</div>
+                                      <div className="text-slate-800">修正案: {item.suggestedRevision}</div>
+                                      <div className="text-slate-400">根拠: {item.sourceResolution}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {rewriteResult.recommendedNextActions?.length > 0 && (
+                                <div>
+                                  <div className="font-bold text-slate-900 mb-1">次アクション</div>
+                                  <ul className="list-disc pl-5 text-slate-600 space-y-1">
+                                    {rewriteResult.recommendedNextActions.map((item, idx) => <li key={idx}>{item}</li>)}
+                                  </ul>
+                                </div>
+                              )}
+                              {rewriteResult.warnings?.length > 0 && (
+                                <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 text-amber-700">
+                                  <div className="font-bold mb-1">注意事項</div>
+                                  <ul className="list-disc pl-5 space-y-1">
+                                    {rewriteResult.warnings.map((item, idx) => <li key={idx}>{item}</li>)}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </div>
 
                       {/* Agendas Editor view */}
